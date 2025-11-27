@@ -14,11 +14,14 @@ class ArxivSpider(scrapy.Spider):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        categories = os.environ.get("CATEGORIES", "cs.CV")
+        # 可以通过环境变量 CATEGORIES 控制要抓的分类，逗号分隔
+        # 例如：math.RT 或 math.QA,math.RT
+        # 默认只抓 math.RT
+        categories = os.environ.get("CATEGORIES", "math.RT")
         # 目标分类（去空格）
         cats = [c.strip() for c in categories.split(",") if c.strip()]
 
-        # 分类优先级：QA 在 RT 前
+        # 分类优先级：QA 在 RT 前（如果你只设 math.RT，这个也没问题）
         self.CAT_PRIORITY = {"math.QA": 0, "math.RT": 1}
         # start_urls 按优先级排序（未知分类放最后）
         cats.sort(key=lambda c: self.CAT_PRIORITY.get(c, 99))
@@ -95,8 +98,18 @@ class ArxivSpider(scrapy.Spider):
                 categories_in_paper = re.findall(code_regex, subjects_text)
                 paper_categories = set(categories_in_paper)
 
-                # 命中任一目标分类才收
-                if paper_categories.intersection(self.target_categories):
+                # ===== 新的“是否命中目标分类”逻辑 =====
+                # 1. 正则命中目标分类
+                has_target = bool(paper_categories.intersection(self.target_categories))
+
+                # 2. 如果正则没命中，但当前页面本身就是某个目标分类（例如 math.RT），
+                #    仍然认为命中，避免因为解析失败漏掉论文
+                if not has_target and source_cat in self.target_categories:
+                    has_target = True
+                    if source_cat:
+                        paper_categories.add(source_cat)
+
+                if has_target:
                     self.seen_ids.add(arxiv_id)
                     page_items.append({
                         "id": arxiv_id,
@@ -123,9 +136,12 @@ class ArxivSpider(scrapy.Spider):
                             "section_rank": 3,
                         })
                     else:
+                        # 真正被过滤掉的情况，这里打印详细信息方便排查
                         self.logger.debug(
-                            f"Skipped {arxiv_id} with categories {paper_categories} "
-                            f"(target: {self.target_categories})"
+                            f"Skipped {arxiv_id} on page {source_cat} "
+                            f"with parsed categories {paper_categories} "
+                            f"(target: {self.target_categories}), "
+                            f"subjects_text={subjects_text!r}"
                         )
 
         # ===== 排序 =====
