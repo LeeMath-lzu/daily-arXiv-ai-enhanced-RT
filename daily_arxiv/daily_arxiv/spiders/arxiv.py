@@ -33,7 +33,7 @@ class ArxivSpider(scrapy.Spider):
         """
         需求：
         1) math.QA 在 math.RT 前（由 __init__ + CONCURRENT_REQUESTS=1 保证页面处理顺序）
-        2) 每个分类内：New submissions -> Cross submissions -> Replacements
+        2) 每个分类内：New submissions -> Cross-lists -> Replacements
         3) 同层内：按 arXiv 编号倒序
         """
         # 从当前 URL 提取“来源分类”，用于学科优先级
@@ -44,6 +44,10 @@ class ArxivSpider(scrapy.Spider):
 
         page_items = []
 
+        # 记录当前分区文本（new/cross/repl/other）
+        current_section_text = "other"
+        current_section_rank = 3
+
         # 遍历 #dlpage 下 h3/dl 的交替结构，识别区块标题
         # 使用 xpath 保证顺序：h3 -> dl -> h3 -> dl ...
         for section in response.xpath("//div[@id='dlpage']/*[self::h3 or self::dl]"):
@@ -51,18 +55,21 @@ class ArxivSpider(scrapy.Spider):
 
             # 识别区块类型，映射成排序键
             if tag == "h3":
-                heading = "".join(section.css("::text").getall()).strip().lower()
-                if "new submission" in heading:
+                heading = "".join(section.css("::text").getall()).strip()
+                heading_lower = heading.lower()
+                # 修正：匹配复数写法（New submissions / Cross-lists / Replacements）
+                if ("new submission" in heading_lower) or ("new submissions" in heading_lower):
                     current_section_rank = 0
-                elif "cross submission" in heading:
+                    current_section_text = "new"
+                elif ("cross-list" in heading_lower) or ("cross-lists" in heading_lower) or ("cross submission" in heading_lower):
                     current_section_rank = 1
-                elif "replacement" in heading:
+                    current_section_text = "cross"
+                elif ("replacement" in heading_lower) or ("replacements" in heading_lower):
                     current_section_rank = 2
+                    current_section_text = "repl"
                 else:
                     current_section_rank = 3
-                # ★ 新增：把 rank 映射为 section 文本，供后面写入 item
-                section_map = {0: "new", 1: "cross", 2: "repl", 3: "other"}
-                current_section_text = section_map.get(current_section_rank, "other")
+                    current_section_text = "other"
                 continue
 
             if tag != "dl":
@@ -72,7 +79,7 @@ class ArxivSpider(scrapy.Spider):
             dts = section.css("dt")
             dds = section.css("dd")
             for paper_dt, paper_dd in zip(dts, dds):
-                # ---- arXiv id + version（最小改动：提取 vN）----
+                # ---- arXiv id ----
                 abs_href = paper_dt.css("a[title='Abstract']::attr(href)").get()
                 if not abs_href:
                     abs_href = paper_dt.css("a[href*='/abs/']::attr(href)").get()
@@ -80,16 +87,21 @@ class ArxivSpider(scrapy.Spider):
                     continue
 
                 abs_url = response.urljoin(abs_href)
-                # 从 /abs/2511.03484v3 提取 id 与 version（无 vN 时默认 v1）
-                mid = re.search(r"/abs/([0-9]{4}\.[0-9]{5})(v\d+)?", abs_url)
+                mid = re.search(r"/abs/([0-9]{4}\.[0-9]{5})", abs_url)
                 if not mid:
                     continue
                 arxiv_id = mid.group(1)
-                version = mid.group(2) or "v1"
 
-                # 去重（跨分类/跨区块）（注意：seen_ids 仍按“裸 id”去重，保持你原有行为）
+                # 去重（跨分类/跨区块）
                 if arxiv_id in self.seen_ids:
                     continue
+
+                # ---- 版本号：优先从 dt 文本中抓取 [vN]；若没有再尝试从 URL；都没有则默认 v1 ----
+                dt_text = " ".join(paper_dt.css("*::text").getall())
+                mver = re.search(r"\[(v\d+)\]", dt_text)
+                if not mver:
+                    mver = re.search(r"/abs/[0-9]{4}\.[0-9]{5}(v\d+)", abs_url)
+                version = (mver.group(1) if mver else "v1")
 
                 # ---- 学科解析（包含 cross-list）----
                 subj_parts = paper_dd.css(".list-subjects ::text").getall()
@@ -105,8 +117,8 @@ class ArxivSpider(scrapy.Spider):
                     self.seen_ids.add(arxiv_id)
                     page_items.append({
                         "id": arxiv_id,
-                        "version": version,                 # ★ 新增：版本号 vN
-                        "section": current_section_text,     # ★ 新增：new / cross / repl
+                        "version": version,                   # <- 修正：正确填入 vN
+                        "section": current_section_text,       # <- 修正：new / cross / repl / other
                         "abs": abs_url,
                         "pdf": abs_url.replace("/abs/", "/pdf/"),
                         "categories": list(paper_categories),
@@ -123,8 +135,8 @@ class ArxivSpider(scrapy.Spider):
                         self.seen_ids.add(arxiv_id)
                         page_items.append({
                             "id": arxiv_id,
-                            "version": version,                 # ★ 同样补上
-                            "section": current_section_text,     # ★ 同样补上
+                            "version": version,
+                            "section": current_section_text,
                             "abs": abs_url,
                             "pdf": abs_url.replace("/abs/", "/pdf/"),
                             "categories": [],
@@ -149,3 +161,4 @@ class ArxivSpider(scrapy.Spider):
             it.pop("cat_priority", None)
             it.pop("section_rank", None)
             yield it
+
