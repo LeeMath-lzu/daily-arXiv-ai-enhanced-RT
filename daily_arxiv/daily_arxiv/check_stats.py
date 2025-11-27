@@ -4,9 +4,9 @@
 用于获取去重检查的状态结果 / Used to get deduplication check status results
 
 功能说明 / Features:
-- 检查当日与昨日论文数据的重复情况 / Check duplication between today's and yesterday's paper data
-- 删除重复论文条目，保留新内容 / Remove duplicate papers, keep new content
-- 根据去重后的结果决定工作流是否继续 / Decide workflow continuation based on deduplication results
+- 检查当日论文数据是否存在 / Check whether today's paper data exists
+- 不做跨日期去重，完整保留当天抓取的论文 / Do not deduplicate across days; keep all papers crawled today
+- 根据检查结果决定后续工作流是否继续 / Decide workflow continuation based on check result
 """
 import json
 import sys
@@ -65,20 +65,18 @@ def save_papers_data(papers, file_path):
 
 def perform_deduplication():
     """
-    执行多日去重：删除与历史多日重复的论文条目，保留新内容
-    Perform deduplication over multiple past days
+    不再做跨日期去重，只检查今天是否有数据。
+    Do not perform cross-day deduplication; only check whether today's data exists.
 
-    Returns:
+    返回值 / Return:
         str: 去重状态 / Deduplication status
              - "has_new_content": 有新内容 / Has new content
-             - "no_new_content": 无新内容 / No new content
+             - "no_new_content": 无新内容（当前逻辑不会返回该值）/ No new content (not used currently)
              - "no_data": 无数据 / No data
              - "error": 处理错误 / Processing error
     """
-
     today = datetime.now().strftime("%Y-%m-%d")
     today_file = f"../data/{today}.jsonl"
-    history_days = 7  # 向前追溯几天的数据进行对比
 
     if not os.path.exists(today_file):
         print("今日数据文件不存在 / Today's data file does not exist", file=sys.stderr)
@@ -89,43 +87,19 @@ def perform_deduplication():
         print(f"今日论文总数: {len(today_papers)} / Today's total papers: {len(today_papers)}", file=sys.stderr)
 
         if not today_papers:
+            # 有文件但没有任何论文
+            print("今日文件存在但没有任何论文记录 / Today's file exists but contains no papers",
+                  file=sys.stderr)
             return "no_data"
 
-        # 收集历史多日 ID 集合
-        history_ids = set()
-        for i in range(1, history_days + 1):
-            date_str = (datetime.now() - timedelta(days=i)).strftime("%Y-%m-%d")
-            history_file = f"../data/{date_str}.jsonl"
-            _, past_ids = load_papers_data(history_file)
-            history_ids.update(past_ids)
-
-        print(f"历史{history_days}日去重库大小: {len(history_ids)} / History {history_days} days deduplication library size: {len(history_ids)}", file=sys.stderr)
-
-        duplicate_ids = today_ids & history_ids
-
-        if duplicate_ids:
-            print(f"发现 {len(duplicate_ids)} 篇历史重复论文 / Found {len(duplicate_ids)} historical duplicate papers", file=sys.stderr)
-            new_papers = [paper for paper in today_papers if paper.get('id', '') not in duplicate_ids]
-
-            print(f"去重后剩余论文数: {len(new_papers)} / Remaining papers after deduplication: {len(new_papers)}", file=sys.stderr)
-
-            if new_papers:
-                if save_papers_data(new_papers, today_file):
-                    print(f"已更新今日文件，移除 {len(duplicate_ids)} 篇重复论文 / Today's file updated, removed {len(duplicate_ids)} duplicate papers", file=sys.stderr)
-                    return "has_new_content"
-                else:
-                    print("保存去重后的数据失败 / Failed to save deduplicated data", file=sys.stderr)
-                    return "error"
-            else:
-                try:
-                    os.remove(today_file)
-                    print("所有论文均为重复内容，已删除今日文件 / All papers are duplicate content, today's file deleted", file=sys.stderr)
-                except Exception as e:
-                    print(f"删除文件失败: {e} / Failed to delete file: {e}", file=sys.stderr)
-                return "no_new_content"
-        else:
-            print("所有内容均为新内容 / All content is new", file=sys.stderr)
-            return "has_new_content"
+        # 关键点：不再进行跨日期 ID 去重，以避免删除 arXiv Replacements 或 cross-list 论文。
+        # Key point: skip cross-day ID deduplication to avoid dropping arXiv replacements or cross-lists.
+        print(
+            "不执行跨日期去重，保留所有 new/cross/replacement 论文 / "
+            "Skip cross-day dedup, keep all new/cross/replacement papers",
+            file=sys.stderr,
+        )
+        return "has_new_content"
 
     except Exception as e:
         print(f"去重处理失败: {e} / Deduplication processing failed: {e}", file=sys.stderr)
@@ -148,11 +122,12 @@ def main():
     # 执行去重处理 / Perform deduplication processing
     dedup_status = perform_deduplication()
 
+    # 根据返回状态决定退出码 / Set exit code based on status
     if dedup_status == "has_new_content":
-        print("✅ 去重完成，发现新内容，继续工作流 / Deduplication completed, new content found, continue workflow", file=sys.stderr)
+        print("✅ 有新内容，继续后续处理 / Has new content, continue workflow", file=sys.stderr)
         sys.exit(0)
     elif dedup_status == "no_new_content":
-        print("⏹️ 去重完成，无新内容，停止工作流 / Deduplication completed, no new content, stop workflow", file=sys.stderr)
+        print("ℹ️ 今日无新增论文，停止后续处理 / No new papers today, stop workflow", file=sys.stderr)
         sys.exit(1)
     elif dedup_status == "no_data":
         print("⏹️ 今日无数据，停止工作流 / No data today, stop workflow", file=sys.stderr)
